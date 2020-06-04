@@ -1,5 +1,8 @@
 require "dump_hook/version"
+require "dump_hook/hooks/mysql"
+require "dump_hook/hooks/postgres"
 require "timecop"
+require "ostruct"
 
 module DumpHook
   class Settings
@@ -11,23 +14,39 @@ module DumpHook
                   :username,
                   :password,
                   :host,
-                  :port
+                  :port,
+                  :sources,
+                  :with_sources
 
     def initialize
-      @database = 'please set database'
       @database_type = 'postgres'
       @dumps_location = 'tmp/dump_hook'
       @remove_old_dumps = true
+      @with_sources = false
+      @sources = {}
     end
   end
 
   class << self
     attr_accessor :settings
-  end
+    attr_accessor :hooks
 
-  def self.setup
-    self.settings = Settings.new
-    yield(settings)
+    def setup
+      self.settings = Settings.new
+      yield(settings)
+      unless settings.sources.empty?
+        settings.with_sources = true
+      end
+      unless settings.database.nil?
+        single_source = { type: settings.database_type.to_sym,
+                          database: settings.database,
+                          username: settings.username,
+                          password: settings.password,
+                          host: settings.host,
+                          port: settings.port }
+        self.settings.sources[settings.database_type.to_sym] = single_source
+      end
+    end
   end
 
   def execute_with_dump(name, opts={}, &block)
@@ -35,7 +54,7 @@ module DumpHook
     actual = opts[:actual] || settings.actual
     create_dirs_if_not_exists
     filename = full_filename(name, created_on, actual)
-    if File.exists?(filename)
+    if File.exist?(filename)
       restore_dump(filename)
     else
       if created_on
@@ -54,30 +73,32 @@ module DumpHook
   end
 
   def store_dump(filename)
-    case settings.database_type
-      when 'postgres'
-        args = ['-a', '-x', '-O', '-f', filename, '-Fc', '-T', 'schema_migrations']
-        args.concat(pg_connection_args)
-        Kernel.system("pg_dump", *args)
-      when 'mysql'
-        args = mysql_connection_args
-        args << "--compress"
-        args.concat ["--result-file", filename]
-        args.concat ["--ignore-table", "#{settings.database}.schema_migrations"]
-        Kernel.system("mysqldump", *args)
+    FileUtils.mkdir_p(filename)
+    settings.sources.each do |name, parameters|
+      filename_with_namespace = File.join(filename, "#{name}.dump")
+      connection_settings = OpenStruct.new(parameters.slice(:database, :username, :password, :port, :host))
+      dumper = case parameters[:type]
+               when :postgres
+                 Hooks::Postgres.new(connection_settings)
+               when :mysql
+                 Hooks::MySql.new(connection_settings)
+               end
+      dumper.dump(filename_with_namespace)
     end
   end
 
   def restore_dump(filename)
-    case settings.database_type
-      when 'postgres'
-        args = pg_connection_args
-        args << filename
-        Kernel.system("pg_restore", *args)
-      when 'mysql'
-        args = mysql_connection_args
-        args.concat ["-e", "source #{filename}"]
-        Kernel.system("mysql", *args)
+    FileUtils.mkdir_p(filename)
+    settings.sources.each do |name, parameters|
+      filename_with_namespace = File.join(filename, "#{name}.dump")
+      connection_settings = OpenStruct.new(parameters.slice(:database, :username, :password, :port, :host))
+      dumper = case parameters[:type]
+               when :postgres
+                 Hooks::Postgres.new(connection_settings)
+               when :mysql
+                 Hooks::MySql.new(connection_settings)
+               end
+      dumper.restore(filename_with_namespace)
     end
   end
 
@@ -88,25 +109,12 @@ module DumpHook
     elsif actual
       name_with_created_on = "#{name_with_created_on}_actual#{actual}"
     end
-    "#{settings.dumps_location}/#{name_with_created_on}.dump"
+    full_path = "#{settings.dumps_location}/#{name_with_created_on}"
+
+    settings.with_sources ? full_path : "#{full_path}.dump"
   end
 
   def create_dirs_if_not_exists
     FileUtils.mkdir_p(settings.dumps_location)
-  end
-
-  def mysql_connection_args
-    args = [settings.database]
-    args.concat ['--user', settings.username] if settings.username
-    args << "--password=#{settings.password}" if settings.password
-    args
-  end
-
-  def pg_connection_args
-    args = ['-d', settings.database]
-    args.concat(['-U', settings.username]) if settings.username
-    args.concat(['-h', settings.host]) if settings.host
-    args.concat(['-p', settings.port]) if settings.port
-    args
   end
 end
