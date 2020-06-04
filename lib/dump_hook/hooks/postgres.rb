@@ -10,7 +10,7 @@ module DumpHook
         args.concat(['-d', @connection_settings.database])
         args.concat(['-U', @connection_settings.username]) if @connection_settings.username
         args.concat(['-h', @connection_settings.host]) if @connection_settings.host
-        args.concat(['-p', @connection_settings.port]) if @connection_settings.port
+        args.concat(['-p', @connection_settings.port.to_s]) if @connection_settings.port
         Kernel.system("pg_dump", *args)
       end
 
@@ -18,7 +18,7 @@ module DumpHook
         args = ['-d', @connection_settings.database]
         args.concat(['-U', @connection_settings.username]) if @connection_settings.username
         args.concat(['-h', @connection_settings.host]) if @connection_settings.host
-        args.concat(['-p', @connection_settings.port]) if @connection_settings.port
+        args.concat(['-p', @connection_settings.port.to_s]) if @connection_settings.port
         args << filename
         Kernel.system("pg_restore", *args)
       end
